@@ -2350,7 +2350,7 @@ class PromptCompressor:
                 context_list[i] = "".join(chunk_list)
                 words.append(chunk_words)
                 word_labels.append(chunk_word_labels)
-            return context_list, words, word_labels
+            return context_list, words, word_labels, 0
 
         chunk_list = []
         for chunks in context_list:
