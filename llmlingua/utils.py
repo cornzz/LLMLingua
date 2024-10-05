@@ -41,6 +41,7 @@ class TokenClfDataset(Dataset):
             raise NotImplementedError()
 
     def __getitem__(self, index):
+        ## Tokenize chunk, insert special tokens and perform padding (or truncation)
         text = self.texts[index]
         tokenized_text = self.tokenizer.tokenize(text)
 

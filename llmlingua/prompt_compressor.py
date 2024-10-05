@@ -2384,14 +2384,17 @@ class PromptCompressor:
                     chunk_ids = ids[j]
                     chunk_mask = mask[j]
 
+                    ## Mask padding tokens
                     active_probs = torch.masked_select(chunk_probs, chunk_mask)
                     active_ids = torch.masked_select(chunk_ids, chunk_mask)
 
+                    ## Convert token ids to tokens (**use model tokenizer**)
                     tokens = self.tokenizer.convert_ids_to_tokens(
                         active_ids.squeeze().tolist()
                     )
                     token_probs = [prob for prob in active_probs.cpu().numpy()]
 
+                    ## Merge tokens to words and calculate word probabilities (mean of token probs)
                     words, valid_token_probs, _ = self.__merge_token_to_word(
                         tokens=tokens,
                         token_probs=token_probs,
@@ -2403,6 +2406,7 @@ class PromptCompressor:
                         valid_token_probs, convert_mode=token_to_word
                     )
 
+                    ## Drop consecutive forced tokens (set their prob to 0)
                     if drop_consecutive:
                         threshold = np.percentile(word_probs, int(100 * reduce_rate))
                         is_token_between = False
@@ -2415,16 +2419,20 @@ class PromptCompressor:
                                     word_probs[i] = 0.0
                                 prev = word
                             else:
+                                ## Discarded tokens do not reset the flag
                                 is_token_between |= word_prob > threshold
 
+                    ## Repeat probs for words with multiple tokens (**use oai tokenizer**)
                     new_token_probs = []
                     for word, word_prob in zip(words, word_probs):
                         num_token = len(self.oai_tokenizer.encode(word))
                         new_token_probs.extend([word_prob for _ in range(num_token)])
+                    ## Calculate threshold (TODO: why not use word_probs??)
                     threshold = np.percentile(
                         new_token_probs, int(100 * reduce_rate + 1)
                     )
 
+                    ## Discard tokens based on threshold
                     keep_words = []
                     word_labels = []
                     assert len(words) == len(word_probs)
@@ -2432,6 +2440,7 @@ class PromptCompressor:
                         if word_prob > threshold or (
                             threshold == 1.0 and word_prob == threshold
                         ):
+                            ## TODO: is this necessary? word_prob is 0 for consecutive forced tokens
                             if (
                                 drop_consecutive
                                 and word in force_tokens
@@ -2440,11 +2449,14 @@ class PromptCompressor:
                             ):
                                 word_labels.append(0)
                             else:
+                                ## Word is kept
                                 keep_words.append(word)
                                 word_labels.append(1)
                         else:
                             word_labels.append(0)
+                    ## Convert token list to string
                     keep_str = self.tokenizer.convert_tokens_to_string(keep_words)
+                    ## Remove leading subword tokenization markers (only llmlingua2-large)
                     if "xlm-roberta-large" in self.model_name:
                         for i in range(len(words)):
                             words[i] = words[i].lstrip("▁")
