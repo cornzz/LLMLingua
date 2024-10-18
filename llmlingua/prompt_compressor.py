@@ -11,6 +11,7 @@ from collections import defaultdict
 from typing import List, Union
 
 import nltk
+import nvtx
 import numpy as np
 import tiktoken
 import torch
@@ -2329,6 +2330,7 @@ class PromptCompressor:
         force_reserve_digit: bool = False,
         drop_consecutive: bool = False,
     ):
+        _comp_rng = nvtx.start_range("__compress", color="magenta", domain="functions")
         def split_string_to_words(input_string):
             pattern = r'\b\w+\b|[<>=/!@#$%^&*()?":{}|\\`~;_+-]'
             result = re.findall(pattern, input_string)
@@ -2370,27 +2372,35 @@ class PromptCompressor:
         model_timings = []
         with torch.no_grad():
             for batch in dataloader:
-                ids = batch["ids"].to(self.device, dtype=torch.long)
-                mask = batch["mask"].to(self.device, dtype=torch.long) == 1
+                with nvtx.annotate("Data to GPU", color="green", domain="model"):
+                    ids = batch["ids"].to(self.device, dtype=torch.long)
+                    mask = batch["mask"].to(self.device, dtype=torch.long) == 1
 
                 start_model = time.perf_counter()
-                outputs = self.model(input_ids=ids, attention_mask=mask)
+                with nvtx.annotate("Model", color="blue", domain="model"):
+                    outputs = self.model(input_ids=ids, attention_mask=mask)
+                    # torch.cuda.synchronize()
                 model_timings.append(time.perf_counter() - start_model)
                 loss, logits = outputs.loss, outputs.logits
-                probs = F.softmax(logits, dim=-1)
+                with nvtx.annotate("Softmax", color="red", domain="model"):
+                    probs = F.softmax(logits, dim=-1)
 
+                pp_rng = nvtx.start_range("Postprocess", color="green", domain="postprocess")
                 for j in range(ids.shape[0]):
                     chunk_probs = probs[j, :, 1]
                     chunk_ids = ids[j]
                     chunk_mask = mask[j]
+                    
+                    with nvtx.annotate("Masked select", color="blue", domain="postprocess"):
+                        active_probs = torch.masked_select(chunk_probs, chunk_mask)
+                        active_ids = torch.masked_select(chunk_ids, chunk_mask)
 
-                    active_probs = torch.masked_select(chunk_probs, chunk_mask)
-                    active_ids = torch.masked_select(chunk_ids, chunk_mask)
-
-                    tokens = self.tokenizer.convert_ids_to_tokens(
-                        active_ids.squeeze().tolist()
-                    )
-                    token_probs = [prob for prob in active_probs.cpu().numpy()]
+                    with nvtx.annotate("Convert IDs to tokens", color="red", domain="postprocess"):
+                        tokens = self.tokenizer.convert_ids_to_tokens(
+                            active_ids.squeeze().tolist()
+                        )
+                    with nvtx.annotate("Convert probs to numpy", color="yellow", domain="postprocess"):
+                        token_probs = [prob for prob in active_probs.cpu().numpy()]
 
                     words, valid_token_probs, _ = self.__merge_token_to_word(
                         tokens=tokens,
@@ -2452,6 +2462,7 @@ class PromptCompressor:
                     compressed_chunk_list.append(keep_str)
                     word_list.append(words[:])
                     word_label_list.append(word_labels[:])
+                nvtx.end_range(pp_rng)
 
         compressed_context_list = []
         original_word_list = []
@@ -2469,4 +2480,5 @@ class PromptCompressor:
                 original_word_label_list[-1].extend(word_label_list[prev_idx + i])
             prev_idx = prev_idx + n_chunk
 
+        nvtx.end_range(_comp_rng)
         return compressed_context_list, original_word_list, original_word_label_list, sum(model_timings)
