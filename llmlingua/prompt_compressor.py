@@ -2368,6 +2368,7 @@ class PromptCompressor:
         word_list = []
         word_label_list = []
         model_timings = []
+        print("### OPTIMIZED: BATCHED MASK")
         with torch.no_grad():
             for batch in dataloader:
                 ids = batch["ids"].to(self.device, dtype=torch.long)
@@ -2379,18 +2380,22 @@ class PromptCompressor:
                 loss, logits = outputs.loss, outputs.logits
                 probs = F.softmax(logits, dim=-1)
 
+                chunk_probs = probs[:, :, 1]
+                chunk_ids = ids
+                chunk_mask = mask
+                # breakpoint()
+                active_probs = torch.masked_select(chunk_probs, chunk_mask)
+                active_ids = torch.masked_select(chunk_ids, chunk_mask)
+
+                batch_sizes = chunk_mask.sum(dim=1).cpu().tolist()
+                split_probs = torch.split(active_probs, batch_sizes)
+                split_ids = torch.split(active_ids, batch_sizes)
+                # st = time.perf_counter()
                 for j in range(ids.shape[0]):
-                    chunk_probs = probs[j, :, 1]
-                    chunk_ids = ids[j]
-                    chunk_mask = mask[j]
-
-                    active_probs = torch.masked_select(chunk_probs, chunk_mask)
-                    active_ids = torch.masked_select(chunk_ids, chunk_mask)
-
                     tokens = self.tokenizer.convert_ids_to_tokens(
-                        active_ids.squeeze().tolist()
+                        split_ids[j].squeeze().tolist()
                     )
-                    token_probs = [prob for prob in active_probs.cpu().numpy()]
+                    token_probs = [prob for prob in split_probs[j].cpu().numpy()]
 
                     words, valid_token_probs, _ = self.__merge_token_to_word(
                         tokens=tokens,
@@ -2452,6 +2457,7 @@ class PromptCompressor:
                     compressed_chunk_list.append(keep_str)
                     word_list.append(words[:])
                     word_label_list.append(word_labels[:])
+                # print("time batch postprocessing", time.perf_counter() - st)
 
         compressed_context_list = []
         original_word_list = []
