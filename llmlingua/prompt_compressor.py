@@ -2372,6 +2372,7 @@ class PromptCompressor:
             for batch in dataloader:
                 ids = batch["ids"].to(self.device, dtype=torch.long)
                 mask = batch["mask"].to(self.device, dtype=torch.long) == 1
+                lengths = batch["lengths"].to(self.device, dtype=torch.long)
 
                 start_model = time.perf_counter()
                 outputs = self.model(input_ids=ids, attention_mask=mask)
@@ -2382,10 +2383,10 @@ class PromptCompressor:
                 for j in range(ids.shape[0]):
                     chunk_probs = probs[j, :, 1]
                     chunk_ids = ids[j]
-                    chunk_mask = mask[j]
+                    text_length = lengths[j] 
 
-                    active_probs = torch.masked_select(chunk_probs, chunk_mask)
-                    active_ids = torch.masked_select(chunk_ids, chunk_mask)
+                    active_probs = chunk_probs[:text_length]
+                    active_ids = chunk_ids[:text_length]
 
                     tokens = self.tokenizer.convert_ids_to_tokens(
                         active_ids.squeeze().tolist()

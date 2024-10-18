@@ -48,11 +48,12 @@ class TokenClfDataset(Dataset):
             [self.cls_token] + tokenized_text + [self.sep_token]
         )  # add special tokens
 
-        if len(tokenized_text) > self.max_len:
+        text_length = len(tokenized_text)
+        if text_length > self.max_len:
             tokenized_text = tokenized_text[: self.max_len]
         else:
             tokenized_text = tokenized_text + [
-                self.pad_token for _ in range(self.max_len - len(tokenized_text))
+                self.pad_token for _ in range(self.max_len - text_length)
             ]
 
         attn_mask = [1 if tok != self.pad_token else 0 for tok in tokenized_text]
@@ -62,6 +63,7 @@ class TokenClfDataset(Dataset):
         return {
             "ids": torch.tensor(ids, dtype=torch.long),
             "mask": torch.tensor(attn_mask, dtype=torch.long),
+            "lengths": text_length,
         }
 
     def __len__(self):
