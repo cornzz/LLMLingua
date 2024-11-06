@@ -4,6 +4,7 @@
 import bisect
 import copy
 import json
+import pickle
 import re
 import string
 import time
@@ -112,7 +113,7 @@ class PromptCompressor:
         self.tokenizer.add_special_tokens(
             {"additional_special_tokens": self.added_tokens}
         )
-        self.model.resize_token_embeddings(len(self.tokenizer))
+        # self.model.resize_token_embeddings(len(self.tokenizer))
 
     def load_model(
         self, model_name: str, device_map: str = "cuda", model_config: dict = {}
@@ -137,27 +138,27 @@ class PromptCompressor:
             if any(key in device_map for key in ["cuda", "cpu", "mps"])
             else "cuda"
         )
-        if "cuda" in device_map or "cpu" in device_map:
-            model = MODEL_CLASS.from_pretrained(
-                model_name,
-                torch_dtype=model_config.pop(
-                    "torch_dtype", "auto" if device_map == "cuda" else torch.float32
-                ),
-                device_map=device_map,
-                config=config,
-                ignore_mismatched_sizes=True,
-                **model_config,
-            )
-        else:
-            model = MODEL_CLASS.from_pretrained(
-                model_name,
-                device_map=device_map,
-                torch_dtype=model_config.pop("torch_dtype", "auto"),
-                pad_token_id=tokenizer.pad_token_id,
-                **model_config,
-            )
+        # if "cuda" in device_map or "cpu" in device_map:
+        #     model = MODEL_CLASS.from_pretrained(
+        #         model_name,
+        #         torch_dtype=model_config.pop(
+        #             "torch_dtype", "auto" if device_map == "cuda" else torch.float32
+        #         ),
+        #         device_map=device_map,
+        #         config=config,
+        #         ignore_mismatched_sizes=True,
+        #         **model_config,
+        #     )
+        # else:
+        #     model = MODEL_CLASS.from_pretrained(
+        #         model_name,
+        #         device_map=device_map,
+        #         torch_dtype=model_config.pop("torch_dtype", "auto"),
+        #         pad_token_id=tokenizer.pad_token_id,
+        #         **model_config,
+        #     )
         self.tokenizer = tokenizer
-        self.model = model
+        # self.model = model
         self.context_idxs = []
         self.max_position_embeddings = config.max_position_embeddings
 
@@ -2375,10 +2376,14 @@ class PromptCompressor:
                 mask = batch["mask"].to(self.device, dtype=torch.long) == 1
 
                 start_model = time.perf_counter()
-                outputs = self.model(input_ids=ids, attention_mask=mask)
+                # outputs = self.model(input_ids=ids, attention_mask=mask)
+                # loss, logits = outputs.loss, outputs.logits
+                # probs = F.softmax(logits, dim=-1)
+                with open("probs.pkl", "rb") as f:
+                    probs = pickle.load(f)
                 model_timings.append(time.perf_counter() - start_model)
-                loss, logits = outputs.loss, outputs.logits
-                probs = F.softmax(logits, dim=-1)
+                # with open("probs.pkl", "wb") as f:
+                #     pickle.dump(probs, f)
 
                 chunk_probs = probs[:, :, 1]
                 chunk_ids = ids
