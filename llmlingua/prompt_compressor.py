@@ -2375,9 +2375,9 @@ class PromptCompressor:
 
                 start_model = time.perf_counter()
                 outputs = self.model(input_ids=ids, attention_mask=mask)
-                model_timings.append(time.perf_counter() - start_model)
                 loss, logits = outputs.loss, outputs.logits
                 probs = F.softmax(logits, dim=-1)
+                model_timings.append(time.perf_counter() - start_model)
 
                 for j in range(ids.shape[0]):
                     chunk_probs = probs[j, :, 1]
