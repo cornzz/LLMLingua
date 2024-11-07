@@ -2385,21 +2385,18 @@ class PromptCompressor:
                 # with open("probs.pkl", "wb") as f:
                 #     pickle.dump(probs, f)
 
-                chunk_probs = probs[:, :, 1]
-                chunk_ids = ids
-                chunk_mask = mask
-                active_probs = torch.masked_select(chunk_probs, chunk_mask)
-                active_ids = torch.masked_select(chunk_ids, chunk_mask)
-
-                batch_sizes = chunk_mask.sum(dim=1).cpu().tolist()
+                active_probs = torch.masked_select(probs[:, :, 1], mask)
+                active_ids = torch.masked_select(ids, mask)
+                batch_sizes = mask.sum(dim=1).cpu().tolist()
                 split_probs = torch.split(active_probs, batch_sizes)
                 split_ids = torch.split(active_ids, batch_sizes)
 
+                split_probs = [p.tolist() for p in split_probs]
+                split_ids = [p.tolist() for p in split_ids]
+
                 for j in range(ids.shape[0]):
-                    tokens = self.tokenizer.convert_ids_to_tokens(
-                        split_ids[j].squeeze().tolist()
-                    )
-                    token_probs = [prob for prob in split_probs[j].cpu().numpy()]
+                    token_probs = split_probs[j]
+                    tokens = self.tokenizer.convert_ids_to_tokens(split_ids[j])
 
                     words, valid_token_probs, _ = self.__merge_token_to_word(
                         tokens=tokens,
