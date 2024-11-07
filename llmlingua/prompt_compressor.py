@@ -2392,11 +2392,11 @@ class PromptCompressor:
                 split_ids = torch.split(active_ids, batch_sizes)
 
                 split_probs = [p.tolist() for p in split_probs]
-                split_ids = [p.tolist() for p in split_ids]
+                split_tokens = [self.tokenizer.convert_ids_to_tokens(p.tolist()) for p in split_ids]
 
                 for j in range(ids.shape[0]):
                     token_probs = split_probs[j]
-                    tokens = self.tokenizer.convert_ids_to_tokens(split_ids[j])
+                    tokens = split_tokens[j]
 
                     words, valid_token_probs, _ = self.__merge_token_to_word(
                         tokens=tokens,
