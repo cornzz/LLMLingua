@@ -2277,6 +2277,7 @@ class PromptCompressor:
         words = []
         word_probs = []
         word_probs_no_force = []
+        digits_regex = re.compile(r"\d")
 
         for token, prob in zip(tokens, token_probs):
             if token in self.special_tokens:
@@ -2292,7 +2293,7 @@ class PromptCompressor:
                 word_probs.append(
                     [
                         1.0
-                        if force_reserve_digit and bool(re.search(r"\d", token))
+                        if force_reserve_digit and digits_regex.search(token)
                         else prob
                     ]
                 )
@@ -2303,7 +2304,7 @@ class PromptCompressor:
                 words[-1] += pure_token
                 word_probs[-1].append(
                     1.0
-                    if force_reserve_digit and bool(re.search(r"\d", token))
+                    if force_reserve_digit and digits_regex.search(token)
                     else prob
                 )
                 word_probs_no_force[-1].append(prob_no_force)
@@ -2369,7 +2370,6 @@ class PromptCompressor:
         word_list = []
         word_label_list = []
         model_timings = []
-        print("### OPTIMIZED: BATCHED MASK")
         with torch.no_grad():
             for batch in dataloader:
                 ids = batch["ids"].to(self.device, dtype=torch.long)
@@ -2388,14 +2388,13 @@ class PromptCompressor:
                 chunk_probs = probs[:, :, 1]
                 chunk_ids = ids
                 chunk_mask = mask
-                # breakpoint()
                 active_probs = torch.masked_select(chunk_probs, chunk_mask)
                 active_ids = torch.masked_select(chunk_ids, chunk_mask)
 
                 batch_sizes = chunk_mask.sum(dim=1).cpu().tolist()
                 split_probs = torch.split(active_probs, batch_sizes)
                 split_ids = torch.split(active_ids, batch_sizes)
-                # st = time.perf_counter()
+
                 for j in range(ids.shape[0]):
                     tokens = self.tokenizer.convert_ids_to_tokens(
                         split_ids[j].squeeze().tolist()
@@ -2462,7 +2461,6 @@ class PromptCompressor:
                     compressed_chunk_list.append(keep_str)
                     word_list.append(words[:])
                     word_label_list.append(word_labels[:])
-                # print("time batch postprocessing", time.perf_counter() - st)
 
         compressed_context_list = []
         original_word_list = []
