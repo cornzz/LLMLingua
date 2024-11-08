@@ -4,6 +4,8 @@
 import bisect
 import copy
 import json
+from multiprocessing import Pool
+import os
 import re
 import string
 import time
@@ -96,6 +98,7 @@ class PromptCompressor:
         max_batch_size: int = 50,
         max_force_token: int = 100,
     ):
+        os.environ["TOKENIZERS_PARALLELISM"] = "true"
         seed_everything(42)
         self.max_batch_size = max_batch_size
         self.max_seq_len = 512
@@ -2193,10 +2196,11 @@ class PromptCompressor:
 
                 start_model = time.perf_counter()
                 outputs = self.model(input_ids=ids, attention_mask=mask)
-                model_timings.append(time.perf_counter() - start_model)
                 loss, logits = outputs.loss, outputs.logits
                 probs = F.softmax(logits, dim=-1)
+                model_timings.append(time.perf_counter() - start_model)
 
+                # TODO: batched masking, move to cpu before loop
                 for j in range(ids.shape[0]):
                     _probs = probs[j, :, 1]
                     _ids = ids[j]
@@ -2220,6 +2224,8 @@ class PromptCompressor:
                         force_tokens=force_tokens,
                         token_map=token_map,
                         force_reserve_digit=force_reserve_digit,
+                        special_tokens=self.special_tokens,
+                        model_name=self.model_name,
                     )
                     word_probs_no_force = self.__token_prob_to_word_prob(
                         valid_token_probs_no_force, convert_mode=token_to_word
@@ -2270,8 +2276,9 @@ class PromptCompressor:
                 st = ed + 1
         return origin_list
 
+    @classmethod
     def __merge_token_to_word(
-        self, tokens, token_probs, force_tokens, token_map, force_reserve_digit
+        cls, tokens, token_probs, force_tokens, token_map, force_reserve_digit, special_tokens, model_name
     ):
         words = []
         word_probs = []
@@ -2279,11 +2286,11 @@ class PromptCompressor:
         digits_regex = re.compile(r"\d")
 
         for token, prob in zip(tokens, token_probs):
-            if token in self.special_tokens:
+            if token in special_tokens:
                 continue
             # add a new word
-            elif is_begin_of_new_word(token, self.model_name, force_tokens, token_map):
-                pure_token = get_pure_token(token, self.model_name)
+            elif is_begin_of_new_word(token, model_name, force_tokens, token_map):
+                pure_token = get_pure_token(token, model_name)
                 prob_no_force = prob
                 if pure_token in force_tokens or pure_token in set(token_map.values()):
                     prob = 1.0
@@ -2299,7 +2306,7 @@ class PromptCompressor:
                 word_probs_no_force.append([prob_no_force])
             # concatenate with previous token
             else:
-                pure_token = get_pure_token(token, self.model_name)
+                pure_token = get_pure_token(token, model_name)
                 words[-1] += pure_token
                 word_probs[-1].append(
                     1.0
@@ -2310,7 +2317,8 @@ class PromptCompressor:
 
         return words, word_probs, word_probs_no_force
 
-    def __token_prob_to_word_prob(self, token_probs, convert_mode="mean"):
+    @classmethod
+    def __token_prob_to_word_prob(cls, token_probs, convert_mode="mean"):
         if convert_mode == "mean":
             word_probs = [sum(p) / len(p) for p in token_probs]
         elif convert_mode == "first":
@@ -2319,6 +2327,83 @@ class PromptCompressor:
             raise NotImplementedError()
 
         return word_probs
+    
+    @classmethod
+    def _postprocess_chunk(
+        cls,
+        token_probs,
+        tokens,
+        force_tokens,
+        token_map,
+        force_reserve_digit,
+        special_tokens,
+        token_to_word,
+        drop_consecutive,
+        reduce_rate,
+        oai_tokenizer,
+        tokenizer,
+        model_name
+    ):
+        words, valid_token_probs, _ = cls.__merge_token_to_word(
+            tokens=tokens,
+            token_probs=token_probs,
+            force_tokens=force_tokens,
+            token_map=token_map,
+            force_reserve_digit=force_reserve_digit,
+            special_tokens=special_tokens,
+            model_name=model_name,
+        )
+        word_probs = cls.__token_prob_to_word_prob(
+            valid_token_probs, convert_mode=token_to_word
+        )
+
+        if drop_consecutive:
+            threshold = np.percentile(word_probs, int(100 * reduce_rate))
+            is_token_between = False
+            prev = None
+            for i, (word, word_prob) in enumerate(zip(words, word_probs)):
+                if word in force_tokens:
+                    if is_token_between:
+                        is_token_between = False
+                    elif not is_token_between and word == prev:
+                        word_probs[i] = 0.0
+                    prev = word
+                else:
+                    is_token_between |= word_prob > threshold
+
+        new_token_probs = []
+        for word, word_prob in zip(words, word_probs):
+            num_token = len(oai_tokenizer.encode(word))
+            new_token_probs.extend([word_prob for _ in range(num_token)])
+        threshold = np.percentile(
+            new_token_probs, int(100 * reduce_rate + 1)
+        )
+
+        keep_words = []
+        word_labels = []
+        assert len(words) == len(word_probs)
+        for word, word_prob in zip(words, word_probs):
+            if word_prob > threshold or (
+                threshold == 1.0 and word_prob == threshold
+            ):
+                if (
+                    drop_consecutive
+                    and word in force_tokens
+                    and len(keep_words) > 0
+                    and keep_words[-1] == word
+                ):
+                    word_labels.append(0)
+                else:
+                    keep_words.append(word)
+                    word_labels.append(1)
+            else:
+                word_labels.append(0)
+        keep_str = tokenizer.convert_tokens_to_string(keep_words)
+        if "xlm-roberta-large" in model_name:
+            for i in range(len(words)):
+                words[i] = words[i].lstrip("▁")
+
+        return keep_str, words, word_labels
 
     def __compress(
         self,
@@ -2389,70 +2474,27 @@ class PromptCompressor:
                 split_probs = [p.tolist() for p in split_probs]
                 split_tokens = [self.tokenizer.convert_ids_to_tokens(p.tolist()) for p in split_ids]
 
-                for j in range(ids.shape[0]):
-                    token_probs = split_probs[j]
-                    tokens = split_tokens[j]
+                with Pool(8) as pool:
+                    tasks = [(
+                        split_probs[j],
+                        split_tokens[j],
+                        force_tokens,
+                        token_map,
+                        force_reserve_digit,
+                        self.special_tokens,
+                        token_to_word,
+                        drop_consecutive,
+                        reduce_rate,
+                        self.oai_tokenizer,
+                        self.tokenizer,
+                        self.model_name
+                    ) for j in range(len(split_probs))]
 
-                    words, valid_token_probs, _ = self.__merge_token_to_word(
-                        tokens=tokens,
-                        token_probs=token_probs,
-                        force_tokens=force_tokens,
-                        token_map=token_map,
-                        force_reserve_digit=force_reserve_digit,
-                    )
-                    word_probs = self.__token_prob_to_word_prob(
-                        valid_token_probs, convert_mode=token_to_word
-                    )
-
-                    if drop_consecutive:
-                        threshold = np.percentile(word_probs, int(100 * reduce_rate))
-                        is_token_between = False
-                        prev = None
-                        for i, (word, word_prob) in enumerate(zip(words, word_probs)):
-                            if word in force_tokens:
-                                if is_token_between:
-                                    is_token_between = False
-                                elif not is_token_between and word == prev:
-                                    word_probs[i] = 0.0
-                                prev = word
-                            else:
-                                is_token_between |= word_prob > threshold
-
-                    new_token_probs = []
-                    for word, word_prob in zip(words, word_probs):
-                        num_token = len(self.oai_tokenizer.encode(word))
-                        new_token_probs.extend([word_prob for _ in range(num_token)])
-                    threshold = np.percentile(
-                        new_token_probs, int(100 * reduce_rate + 1)
-                    )
-
-                    keep_words = []
-                    word_labels = []
-                    assert len(words) == len(word_probs)
-                    for word, word_prob in zip(words, word_probs):
-                        if word_prob > threshold or (
-                            threshold == 1.0 and word_prob == threshold
-                        ):
-                            if (
-                                drop_consecutive
-                                and word in force_tokens
-                                and len(keep_words) > 0
-                                and keep_words[-1] == word
-                            ):
-                                word_labels.append(0)
-                            else:
-                                keep_words.append(word)
-                                word_labels.append(1)
-                        else:
-                            word_labels.append(0)
-                    keep_str = self.tokenizer.convert_tokens_to_string(keep_words)
-                    if "xlm-roberta-large" in self.model_name:
-                        for i in range(len(words)):
-                            words[i] = words[i].lstrip("▁")
-
-                    compressed_chunk_list.append(keep_str)
-                    word_list.append(words[:])
-                    word_label_list.append(word_labels[:])
+                    results = pool.starmap(self._postprocess_chunk, tasks)
+                    for keep_str, words, word_labels in results:
+                        compressed_chunk_list.append(keep_str)
+                        word_list.append(words)
+                        word_label_list.append(word_labels)
 
         compressed_context_list = []
         original_word_list = []
