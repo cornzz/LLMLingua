@@ -79,6 +79,7 @@ class PromptCompressor:
         llmlingua2_config: dict = {},
     ):
         self.model_name = model_name
+        self.model_time = 0
         self.use_llmlingua2 = use_llmlingua2
         self.retrieval_model = None
         self.retrieval_model_name = None
@@ -185,6 +186,7 @@ class PromptCompressor:
             end = input_ids.shape[1]
         end = min(end, past_length + self.max_position_embeddings)
         with torch.no_grad():
+            start = time.perf_counter()
             response = self.model(
                 input_ids[:, past_length:end],
                 attention_mask=attention_mask[:, :end],
@@ -192,6 +194,7 @@ class PromptCompressor:
                 use_cache=True,
             )
             past_key_values = response.past_key_values
+            self.model_time += time.perf_counter() - start
 
         shift_logits = response.logits[..., :-1, :].contiguous()
         shift_labels = input_ids[..., past_length + 1 : end].contiguous()
@@ -463,7 +466,6 @@ class PromptCompressor:
         force_reserve_digit: bool = False,
         drop_consecutive: bool = False,
         chunk_end_tokens: List[str] = [".", "\n"],
-        return_timings: bool = False,
         strict_preserve_uncompressed: bool = True,
     ):
         """
@@ -520,7 +522,6 @@ class PromptCompressor:
             drop_consecutive (bool, optinal): Whether to drop tokens which are in 'force_tokens' but appears consecutively in compressed prompt.
                 Default is False.
             chunk_end_tokens (List[str], optinal): The early stop tokens for segmenting chunk. Default is [".", "\n"],
-            return_timings (bool, optional): Whether to return the timings of the compression process. Default is False.
         Returns:
             dict: A dictionary containing:
                 - "compressed_prompt" (str): The resulting compressed prompt.
@@ -533,8 +534,9 @@ class PromptCompressor:
                 - "ratio" (str): The compression ratio achieved, calculated as the original token number divided by the token number after compression.
                 - "rate" (str): The compression rate achieved, in a human-readable format.
                 - "saving" (str): Estimated savings in GPT-4 token usage.
-                - "timings" (dict): A dictionary containing the timings of the compression process. Only returned in llmlingua2 if return_timings is True.
+                - "timings" (dict): A dictionary containing the timings of the compression process.
         """
+        self.model_time = 0
         if self.use_llmlingua2:
             return self.compress_prompt_llmlingua2(
                 context,
@@ -554,12 +556,12 @@ class PromptCompressor:
                 force_reserve_digit=force_reserve_digit,
                 drop_consecutive=drop_consecutive,
                 chunk_end_tokens=chunk_end_tokens,
-                return_timings=return_timings,
             )
         assert (
             rate <= 1.0
         ), "Error: 'rate' must not exceed 1.0. The value of 'rate' indicates compression rate and must be within the range [0, 1]."
 
+        start = time.perf_counter()
         if not context:
             context = [" "]
         if isinstance(context, str):
@@ -725,6 +727,10 @@ class PromptCompressor:
             "ratio": f"{ratio:.1f}x",
             "rate": f"{rate * 100:.1f}%",
             "saving": f", Saving ${saving:.1f} in GPT-4.",
+            "timings": {
+                "total": time.perf_counter() - start,
+                "model": self.model_time
+            },
         }
 
     def compress_prompt_llmlingua2(
@@ -746,7 +752,6 @@ class PromptCompressor:
         force_reserve_digit: bool = False,
         drop_consecutive: bool = False,
         chunk_end_tokens: List[str] = [".", "\n"],
-        return_timings: bool = False,
     ):
         """
         Compresses the given context, instruction and question.
@@ -776,7 +781,6 @@ class PromptCompressor:
             drop_consecutive (bool, optinal): Whether to drop tokens which are in 'force_tokens' but appears consecutively in compressed prompt.
                 Default is False.
             chunk_end_tokens (List[str], optional): The early stop tokens for segmenting chunk. Default is [".", "\n"].
-            return_timings (bool, optional): Whether to return the timings of the compression process. Default is False.
         Returns:
             dict: A dictionary containing:
                 - "compressed_prompt" (str): The resulting compressed prompt.
@@ -846,7 +850,7 @@ class PromptCompressor:
                     context_level_target_token / n_original_token, 1.0
                 )
 
-            context_probs, context_words, ctx_model_time = self.__get_context_prob(
+            context_probs, context_words = self.__get_context_prob(
                 context_chunked,
                 token_to_word=token_to_word,
                 force_tokens=force_tokens,
@@ -874,7 +878,7 @@ class PromptCompressor:
                 rate = min(target_token / n_reserved_token, 1.0)
 
             if use_token_level_filter:
-                compressed_context, word_list, word_label_list, model_time = self.__compress(
+                compressed_context, word_list, word_label_list = self.__compress(
                     reserved_context,
                     reduce_rate=max(0, 1 - rate),
                     token_to_word=token_to_word,
@@ -884,7 +888,7 @@ class PromptCompressor:
                     drop_consecutive=drop_consecutive,
                 )
             else:
-                compressed_context, word_list, word_label_list, model_time = self.__compress(
+                compressed_context, word_list, word_label_list = self.__compress(
                     reserved_context,
                     reduce_rate=0,
                     token_to_word=token_to_word,
@@ -926,18 +930,17 @@ class PromptCompressor:
                     [f"{word}{label_sep}{label}" for word, label in zip(words, labels)]
                 )
                 res["fn_labeled_original_prompt"] = word_label_lines
-            if return_timings:
-                res["timings"] = {
-                    "total": time.perf_counter() - start,
-                    "model": model_time + ctx_model_time
-                }
+            res["timings"] = {
+                "total": time.perf_counter() - start,
+                "model": self.model_time
+            }
             return res
 
         if target_token > 0:
             rate = min(target_token / n_original_token, 1.0)
 
         if use_token_level_filter:
-            compressed_context, word_list, word_label_list, model_time = self.__compress(
+            compressed_context, word_list, word_label_list = self.__compress(
                 context_chunked,
                 reduce_rate=max(0, 1 - rate),
                 token_to_word=token_to_word,
@@ -947,7 +950,7 @@ class PromptCompressor:
                 drop_consecutive=drop_consecutive,
             )
         else:
-            compressed_context, word_list, word_label_list, model_time = self.__compress(
+            compressed_context, word_list, word_label_list = self.__compress(
                 context_chunked,
                 reduce_rate=0,
                 token_to_word=token_to_word,
@@ -982,8 +985,7 @@ class PromptCompressor:
                 [f"{word}{label_sep}{label}" for word, label in zip(words, labels)]
             )
             res["fn_labeled_original_prompt"] = word_label_lines
-        if return_timings:
-            res["timings"] = {"total": time.perf_counter() - start, "model": model_time}
+        res["timings"] = {"total": time.perf_counter() - start, "model": self.model_time}
         return res
 
     def get_token_length(
@@ -2185,7 +2187,6 @@ class PromptCompressor:
 
         chunk_probs = []
         chunk_words = []
-        model_timings = []
         with torch.no_grad():
             for batch in dataloader:
                 ids = batch["ids"].to(self.device, dtype=torch.long)
@@ -2193,9 +2194,9 @@ class PromptCompressor:
 
                 start_model = time.perf_counter()
                 outputs = self.model(input_ids=ids, attention_mask=mask)
-                model_timings.append(time.perf_counter() - start_model)
                 loss, logits = outputs.loss, outputs.logits
                 probs = F.softmax(logits, dim=-1)
+                self.model_time += time.perf_counter() - start_model
 
                 for j in range(ids.shape[0]):
                     _probs = probs[j, :, 1]
@@ -2243,7 +2244,7 @@ class PromptCompressor:
                 context_words[-1].extend(chunk_words[prev_idx + i])
             prev_idx = prev_idx + n_chunk
         context_probs = [sum(probs) / len(probs) for probs in context_probs]
-        return context_probs, context_words, sum(model_timings)
+        return context_probs, context_words
 
     def __chunk_context(self, origin_text, chunk_end_tokens):
         # leave 2 token for CLS and SEP
@@ -2350,7 +2351,7 @@ class PromptCompressor:
                 context_list[i] = "".join(chunk_list)
                 words.append(chunk_words)
                 word_labels.append(chunk_word_labels)
-            return context_list, words, word_labels, 0
+            return context_list, words, word_labels
 
         chunk_list = []
         for chunks in context_list:
@@ -2367,7 +2368,6 @@ class PromptCompressor:
         compressed_chunk_list = []
         word_list = []
         word_label_list = []
-        model_timings = []
         with torch.no_grad():
             for batch in dataloader:
                 ids = batch["ids"].to(self.device, dtype=torch.long)
@@ -2377,7 +2377,7 @@ class PromptCompressor:
                 outputs = self.model(input_ids=ids, attention_mask=mask)
                 loss, logits = outputs.loss, outputs.logits
                 probs = F.softmax(logits, dim=-1)
-                model_timings.append(time.perf_counter() - start_model)
+                self.model_time += time.perf_counter() - start_model
 
                 for j in range(ids.shape[0]):
                     chunk_probs = probs[j, :, 1]
@@ -2469,4 +2469,4 @@ class PromptCompressor:
                 original_word_label_list[-1].extend(word_label_list[prev_idx + i])
             prev_idx = prev_idx + n_chunk
 
-        return compressed_context_list, original_word_list, original_word_label_list, sum(model_timings)
+        return compressed_context_list, original_word_list, original_word_label_list
