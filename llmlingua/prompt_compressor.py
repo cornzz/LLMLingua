@@ -80,6 +80,7 @@ class PromptCompressor:
     ):
         self.model_name = model_name
         self.model_time = 0
+        self.model_passes = 0
         self.use_llmlingua2 = use_llmlingua2
         self.retrieval_model = None
         self.retrieval_model_name = None
@@ -195,6 +196,7 @@ class PromptCompressor:
             )
             past_key_values = response.past_key_values
             self.model_time += time.perf_counter() - start_model
+            self.model_passes += 1
 
         shift_logits = response.logits[..., :-1, :].contiguous()
         shift_labels = input_ids[..., past_length + 1 : end].contiguous()
@@ -537,6 +539,7 @@ class PromptCompressor:
                 - "timings" (dict): A dictionary containing the timings of the compression process.
         """
         self.model_time = 0
+        self.model_passes = 0
         if self.use_llmlingua2:
             return self.compress_prompt_llmlingua2(
                 context,
@@ -729,7 +732,8 @@ class PromptCompressor:
             "saving": f", Saving ${saving:.1f} in GPT-4.",
             "timings": {
                 "total": time.perf_counter() - start_total,
-                "model": self.model_time
+                "model": self.model_time,
+                "passes": self.model_passes,
             },
         }
 
@@ -932,7 +936,8 @@ class PromptCompressor:
                 res["fn_labeled_original_prompt"] = word_label_lines
             res["timings"] = {
                 "total": time.perf_counter() - start_total,
-                "model": self.model_time
+                "model": self.model_time,
+                "passes": self.model_passes,
             }
             return res
 
@@ -985,7 +990,11 @@ class PromptCompressor:
                 [f"{word}{label_sep}{label}" for word, label in zip(words, labels)]
             )
             res["fn_labeled_original_prompt"] = word_label_lines
-        res["timings"] = {"total": time.perf_counter() - start_total, "model": self.model_time}
+        res["timings"] = {
+            "total": time.perf_counter() - start_total,
+            "model": self.model_time,
+            "passes": self.model_passes,
+        }
         return res
 
     def get_token_length(
@@ -2199,6 +2208,7 @@ class PromptCompressor:
                 loss, logits = outputs.loss, outputs.logits
                 probs = F.softmax(logits, dim=-1)
                 self.model_time += time.perf_counter() - start_model
+                self.model_passes += 1
 
                 for j in range(ids.shape[0]):
                     _probs = probs[j, :, 1]
@@ -2380,6 +2390,7 @@ class PromptCompressor:
                 loss, logits = outputs.loss, outputs.logits
                 probs = F.softmax(logits, dim=-1)
                 self.model_time += time.perf_counter() - start_model
+                self.model_passes += 1
 
                 for j in range(ids.shape[0]):
                     chunk_probs = probs[j, :, 1]
